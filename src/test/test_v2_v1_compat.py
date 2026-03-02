@@ -1,12 +1,17 @@
 """Tests for Pydantic v2-v1 compatibility."""
 
+import sys
+
 import pytest
 
 from pydantic.version import VERSION as PYDANTIC_VERSION
 from pydantic_yaml import to_yaml_str, parse_yaml_raw_as
 
 
-@pytest.mark.skipif(PYDANTIC_VERSION < "2", reason="Only supported for Pydantic v2.")
+@pytest.mark.skipif(
+    (PYDANTIC_VERSION < "2") or (sys.version_info >= (3, 14)),
+    reason="Only supported for Pydantic v2 on Python < 3.14.",
+)
 def test_pydantic_v2_v1_compat() -> None:
     """Test v1-compatibility in pydantic v2."""
     from pydantic.v1 import BaseModel

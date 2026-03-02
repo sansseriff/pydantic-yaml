@@ -11,6 +11,7 @@ Roundtrip comments with ruamel.yaml
 # mypy: ignore-errors
 
 import json
+import sys
 import warnings
 from collections.abc import Mapping, Sequence
 from io import BytesIO, IOBase, StringIO
@@ -26,21 +27,32 @@ if (PYDANTIC_VERSION < "2") or (PYDANTIC_VERSION > "3"):
 
 from pydantic import BaseModel, RootModel, TypeAdapter
 from pydantic.fields import FieldInfo
-from pydantic.v1 import BaseModel as BaseModelV1
-from pydantic.v1 import parse_obj_as
-from pydantic.v1.fields import FieldInfo as FieldInfoV1
-from pydantic.v1.fields import ModelField as ModelFieldV1
 
 from .comments import CommentsOptions
 
-T = TypeVar("T", bound=BaseModel | BaseModelV1)
+_PydanticV1BaseModelType: type[Any] | None
+_PydanticV1ModelFieldType: type[Any] | None
+
+if sys.version_info < (3, 14):
+    from pydantic.v1 import BaseModel as _PydanticV1BaseModel
+    from pydantic.v1 import parse_obj_as
+    from pydantic.v1.fields import ModelField as _PydanticV1ModelField
+
+    _PydanticV1BaseModelType = _PydanticV1BaseModel
+    _PydanticV1ModelFieldType = _PydanticV1ModelField
+else:
+    _PydanticV1BaseModelType = None
+    _PydanticV1ModelFieldType = None
+    parse_obj_as = None
+
+T = TypeVar("T")
 
 
-def _chk_model(model: Any) -> tuple[BaseModel | BaseModelV1, Literal[1, 2]]:
+def _chk_model(model: Any) -> tuple[BaseModel | Any, Literal[1, 2]]:
     """Ensure the model passed is a Pydantic model."""
     if isinstance(model, BaseModel):
         return model, 2
-    elif isinstance(model, BaseModelV1):
+    elif _PydanticV1BaseModelType and isinstance(model, _PydanticV1BaseModelType):
         return model, 1
     raise TypeError(
         "We can currently only write `pydantic.BaseModel` or `pydantic.v1.BaseModel`"
@@ -49,25 +61,25 @@ def _chk_model(model: Any) -> tuple[BaseModel | BaseModelV1, Literal[1, 2]]:
 
 
 def _get_doc(
-    obj: BaseModel | BaseModelV1 | FieldInfo | FieldInfoV1 | ModelFieldV1 | Any, opts: CommentsOptions
+    obj: BaseModel | FieldInfo | Any, opts: CommentsOptions
 ) -> str | None:
     """Get documentation for the model or field, taking options into account."""
-    if isinstance(obj, BaseModel | BaseModelV1):
+    if isinstance(obj, BaseModel) or (_PydanticV1BaseModelType and isinstance(obj, _PydanticV1BaseModelType)):
         if opts in (True, "models-only"):
             return getattr(obj, "__doc__", None)
         return None
-    elif isinstance(obj, FieldInfo | FieldInfoV1):
+    elif isinstance(obj, FieldInfo):
         if opts in (True, "fields-only"):
             return obj.description
         return None
-    elif isinstance(obj, ModelFieldV1):
+    elif _PydanticV1ModelFieldType and isinstance(obj, _PydanticV1ModelFieldType):
         return _get_doc(obj.field_info, opts=opts)
     return None
 
 
 def _add_descriptions(
     ystruct: CommentedMap | CommentedSeq,  # or other stuff...
-    obj: BaseModel | BaseModelV1 | Mapping | Sequence | Any,
+    obj: BaseModel | Mapping | Sequence | Any,
     opts: CommentsOptions,
 ) -> None:
     """Add descriptions from the object to the yaml struct (modifying it).
@@ -88,18 +100,18 @@ def _add_descriptions(
             # RootModel should probably work
             assert isinstance(obj, RootModel), "Model incorrectly set as RootModel."
             obj = obj.root
-    elif isinstance(obj, BaseModelV1):
+    elif _PydanticV1BaseModelType and isinstance(obj, _PydanticV1BaseModelType):
         if obj.__custom_root_type__:
             # RootModel should probably work
             obj = obj.__dict__["__root__"]
 
-    if isinstance(obj, BaseModel | BaseModelV1):
+    if isinstance(obj, BaseModel) or (_PydanticV1BaseModelType and isinstance(obj, _PydanticV1BaseModelType)):
         # Add field information
-        flds: dict[str, FieldInfo] | dict[str, FieldInfoV1]
+        flds: dict[str, Any]
 
         if isinstance(obj, BaseModel):
             flds = type(obj).model_fields
-        elif isinstance(obj, BaseModelV1):
+        elif _PydanticV1BaseModelType and isinstance(obj, _PydanticV1BaseModelType):
             flds = obj.__fields__
 
         for fld_name, fld_info in flds.items():
@@ -111,7 +123,10 @@ def _add_descriptions(
 
                 # Recurse into fields
                 fld_obj = getattr(obj, fld_name, None)
-                if isinstance(fld_obj, BaseModel | BaseModelV1 | Sequence | Mapping):
+                if (
+                    isinstance(fld_obj, BaseModel | Sequence | Mapping)
+                    or (_PydanticV1BaseModelType and isinstance(fld_obj, _PydanticV1BaseModelType))
+                ):
                     _add_descriptions(ystruct[fld_name], fld_obj, opts=opts)
                 # otherwise - no additional descriptions
     elif isinstance(obj, Sequence) and isinstance(ystruct, CommentedSeq):
@@ -125,7 +140,7 @@ def _add_descriptions(
 
 def _write_yaml_model(
     stream: IOBase,
-    model: BaseModel | BaseModelV1,
+    model: BaseModel | Any,
     *,
     add_comments: CommentsOptions = False,
     default_flow_style: bool | None = None,
@@ -201,7 +216,7 @@ def _write_yaml_model(
 
 
 def to_yaml_str(
-    model: BaseModel | BaseModelV1,
+    model: BaseModel | Any,
     *,
     add_comments: CommentsOptions = False,
     default_flow_style: bool | None = False,
@@ -258,7 +273,7 @@ def to_yaml_str(
 
 def to_yaml_file(
     file: Path | str | IOBase,
-    model: BaseModel | BaseModelV1,
+    model: BaseModel | Any,
     *,
     add_comments: CommentsOptions = False,
     default_flow_style: bool | None = False,
@@ -345,8 +360,14 @@ def parse_yaml_raw_as(model_type: type[T], raw: str | bytes | IOBase) -> T:
         raise TypeError(f"Expected str, bytes or IO, but got {raw!r}")
     reader = YAML(typ="safe", pure=True)  # YAML 1.2 support
     objects = reader.load(stream)
-    if isinstance(model_type, type) and issubclass(model_type, BaseModelV1):
-        return parse_obj_as(model_type, objects)  # type:ignore
+    if _PydanticV1BaseModelType and isinstance(model_type, type) and issubclass(model_type, _PydanticV1BaseModelType):
+        return parse_obj_as(model_type, objects)  # type:ignore[operator,misc]
+    elif (not _PydanticV1BaseModelType) and isinstance(model_type, type) and model_type.__module__.startswith(
+        "pydantic.v1"
+    ):
+        raise TypeError(
+            "pydantic.v1 models are not supported on Python 3.14+ due to upstream compatibility constraints."
+        )
     else:
         ta = TypeAdapter(model_type)  # type: ignore
         return ta.validate_python(objects)
